@@ -32,14 +32,32 @@ python3 src/bench.py <example>
 | `launch_per_pid` | Launch the app and save under `results/<name>/<pid>/` |
 | `attach_by_name` | Attach via `pidof`; save all matching PIDs under `results/<name>/` |
 | `attach_per_pid` | Attach via `pidof`; save each PID under `results/<name>/<pid>/` |
+| `attach_gz_sim` | Attach to `gz sim server` and `gz sim gui` concurrently |
 
 ```bash
 python3 src/bench.py launch_by_name
 python3 src/bench.py attach_per_pid
+python3 src/bench.py attach_gz_sim
 python3 src/bench.py --help
 ```
 
-The examples target `gnome-text-editor` by default. Change the process in `_base_config()` inside `src/bench.py`, or build your own `BencherConfig`.
+Most examples target `gnome-text-editor` by default. Change the process in `_base_config()` inside `src/bench.py`, or build your own `BencherConfig`.
+
+### Gazebo Sim (`attach_gz_sim`)
+
+Attaches to the already-running processes named `gz sim server` and `gz sim gui` (via `pidof`) and samples them in the **same** timestep loop (concurrent / alternating), then writes:
+
+* `results/gz-sim-server/`
+* `results/gz-sim-gui/`
+
+Start Gazebo before running this example (or let it wait up to `wait_timeout`).
+
+Use `attach_names` on `BencherConfig` to watch multiple processes together:
+
+```python
+cfg.attach = True
+cfg.attach_names = ["gz sim server", "gz sim gui"]
+```
 
 ## Configuration (`BencherConfig`)
 
@@ -52,6 +70,7 @@ The examples target `gnome-text-editor` by default. Change the process in `_base
 | `sample_time` | `1` | Seconds between samples |
 | `sample_total` | `100` | Number of samples to collect |
 | `attach` | `False` | If `True`, find the process with `pidof` instead of launching it |
+| `attach_names` | `[]` | Process names for `pidof`; multiple names are sampled concurrently. If empty, uses `executable` or `name` |
 | `save_per_pid` | `False` | If `True`, store under `results/<name>/<pid>/`; otherwise under `results/<name>/` |
 | `wait_timeout` | `30.0` | Max seconds to wait for the process when attaching |
 | `wait_timestep` | `0.5` | Poll interval (seconds) while waiting for `pidof` |

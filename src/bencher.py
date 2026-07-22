@@ -16,6 +16,9 @@ class BencherConfig:
         self.sample_total = 100
         # Attach to an already-running process via `pidof` instead of launching it.
         self.attach = False
+        # Process names for pidof when attach=True. Multiple names are sampled concurrently.
+        # If empty, falls back to [executable or name].
+        self.attach_names = list([])
         # True: store under results/<name>/<pid>/; False: store under results/<name>/ (many pids share the name).
         self.save_per_pid = False
         # How long to wait (seconds) for the process to appear when attaching.
@@ -27,6 +30,7 @@ class BencherConfig:
 class BencherData:
     def __init__(self):
         self.pid = None
+        self.process_name = None
         self.cpu_pct = list()
         self.mem_info = list()
         self.num_threads = list()
@@ -39,6 +43,7 @@ class BencherData:
 
     def clear(self):
         self.pid = None
+        self.process_name = None
         self.cpu_pct.clear()
         self.mem_info.clear()
         self.num_threads.clear()
@@ -89,6 +94,7 @@ class Bencher:
         self.sample_total = 100
         self.sample_current = 0
         self.attach = False
+        self.attach_names = list([])
         self.save_per_pid = False
         self.wait_timeout = 30.0
         self.wait_timestep = 0.5
@@ -106,16 +112,24 @@ class Bencher:
         self.sample_time = config.sample_time
         self.sample_total = config.sample_total
         self.attach = config.attach
+        self.attach_names = list(config.attach_names) if config.attach_names else []
         self.save_per_pid = config.save_per_pid
         self.wait_timeout = config.wait_timeout
         self.wait_timestep = config.wait_timestep
         self.sample_current = 0
 
+    def _results_base(self, data: BencherData) -> str:
+        """Directory label under results/ for a sample set."""
+        if data.process_name:
+            return data.process_name.replace(' ', '-')
+        return self.name
+
     def results_dir_for(self, data: BencherData) -> str:
         """Return the results directory path for a given sample set."""
+        base = self._results_base(data)
         if self.save_per_pid and data.pid is not None:
-            return f'results/{self.name}/{data.pid}/'
-        return f'results/{self.name}/'
+            return f'results/{base}/{data.pid}/'
+        return f'results/{base}/'
 
     def _result_groups(self):
         """Yield (results_dir, label, entries) groups for saving plots/data."""
@@ -123,14 +137,24 @@ class Bencher:
             return
 
         if self.save_per_pid:
-            by_pid = {}
+            by_key = {}
             for data in self.data_history:
-                by_pid.setdefault(data.pid, []).append(data)
-            for pid, entries in by_pid.items():
-                label = f"{self.name} (pid {pid})"
-                yield self.results_dir_for(entries[0]), label, entries
-        else:
-            yield f'results/{self.name}/', self.name, self.data_history
+                key = (self._results_base(data), data.pid)
+                by_key.setdefault(key, []).append(data)
+            for (base, pid), entries in by_key.items():
+                yield (
+                    f'results/{base}/{pid}/',
+                    f"{base} (pid {pid})",
+                    entries,
+                )
+            return
+
+        by_base = {}
+        for data in self.data_history:
+            base = self._results_base(data)
+            by_base.setdefault(base, []).append(data)
+        for base, entries in by_base.items():
+            yield f'results/{base}/', base, entries
 
     def _plot_metric(self, entries, label: str, attr: str, ylabel: str, title: str):
         fig, ax = plt.subplots()
@@ -151,29 +175,20 @@ class Bencher:
     def save_csv(self):
         """Persist each BencherData sample set as CSV under the configured results layout."""
         saved = []
-        if self.save_per_pid:
-            by_pid = {}
-            for data in self.data_history:
-                by_pid.setdefault(data.pid, []).append(data)
-
-            for entries in by_pid.values():
-                results_dir = self.results_dir_for(entries[0])
-                os.makedirs(results_dir, exist_ok=True)
-                for i, data in enumerate(entries):
+        for results_dir, _label, entries in self._result_groups():
+            os.makedirs(results_dir, exist_ok=True)
+            for i, data in enumerate(entries):
+                if (
+                    not self.save_per_pid
+                    and data.pid is not None
+                    and self.attach
+                    and len(entries) > 1
+                ):
+                    path = os.path.join(results_dir, f'{data.pid}.csv')
+                else:
                     path = os.path.join(results_dir, f'{i}.csv')
-                    data.to_data_frame().to_csv(path)
-                    saved.append(path)
-            return saved
-
-        results_dir = f'results/{self.name}/'
-        os.makedirs(results_dir, exist_ok=True)
-        for i, data in enumerate(self.data_history):
-            if data.pid is not None and self.attach:
-                path = os.path.join(results_dir, f'{data.pid}.csv')
-            else:
-                path = os.path.join(results_dir, f'{i}.csv')
-            data.to_data_frame().to_csv(path)
-            saved.append(path)
+                data.to_data_frame().to_csv(path)
+                saved.append(path)
         return saved
 
     def save_png(self, show: bool = False):
@@ -302,30 +317,46 @@ class Bencher:
 
         return [int(pid) for pid in result.stdout.strip().split()]
 
-    def _wait_for_pids(self) -> list:
-        """Poll pidof until at least one PID appears or wait_timeout elapses."""
-        process_name = self.executable or self.name
-        deadline = time.time() + self.wait_timeout
-        pids = self._pidof(process_name)
+    def _attach_process_names(self) -> list:
+        """Process names to look up with pidof when attaching."""
+        if self.attach_names:
+            return list(self.attach_names)
+        return [self.executable or self.name]
 
-        while not pids and time.time() < deadline:
+    def _wait_for_pids(self) -> dict:
+        """Poll pidof until every attach name has a PID, or wait_timeout elapses.
+
+        Returns a mapping of pid -> process_name for all discovered processes.
+        Names that never appear are omitted (a warning is printed).
+        """
+        names = self._attach_process_names()
+        deadline = time.time() + self.wait_timeout
+        found = {name: self._pidof(name) for name in names}
+
+        while (not all(found[name] for name in names)) and time.time() < deadline:
+            missing = [name for name in names if not found[name]]
             remaining = max(0.0, deadline - time.time())
             print(
-                f"Waiting for process '{process_name}' "
+                f"Waiting for process(es) {missing} "
                 f"(timeout in {remaining:.1f}s)..."
             )
             time.sleep(min(self.wait_timestep, remaining) if remaining > 0 else 0)
-            pids = self._pidof(process_name)
+            found = {name: self._pidof(name) for name in names}
 
-        if not pids:
-            print(
-                f"No process named '{process_name}' found "
-                f"within {self.wait_timeout}s"
-            )
-        else:
-            print(f"Found PID(s) for '{process_name}': {pids}")
+        pid_to_name = {}
+        for name in names:
+            pids = found.get(name) or []
+            if not pids:
+                print(
+                    f"No process named '{name}' found "
+                    f"within {self.wait_timeout}s"
+                )
+                continue
+            print(f"Found PID(s) for '{name}': {pids}")
+            for pid in pids:
+                pid_to_name[pid] = name
 
-        return pids
+        return pid_to_name
 
     def _sample_once(self, process: psutil.Process, data: BencherData, cpu_count: int):
         data.sample_timestamp.append(time.time() - self.init_time)
@@ -357,16 +388,22 @@ class Bencher:
             self.data = data
             self.callback(self)
 
-    def _sample_processes(self, processes: dict, kill_on_done: bool = False):
+    def _sample_processes(self, processes: dict, pid_names: dict = None, kill_on_done: bool = False):
         """Sample one or more processes until sample_total is reached.
 
         processes: mapping of pid -> psutil.Process
+        pid_names: optional mapping of pid -> process_name (for multi-name attach)
+        All processes are sampled in the same timestep loop (concurrent/alternating).
         """
+        if pid_names is None:
+            pid_names = {}
+
         cpu_count = psutil.cpu_count()
         datas = {}
         for pid in processes:
             data = BencherData()
             data.pid = pid
+            data.process_name = pid_names.get(pid)
             datas[pid] = data
 
         self.sample_current = 0
@@ -417,12 +454,12 @@ class Bencher:
 
         try:
             if self.attach:
-                pids = self._wait_for_pids()
-                if not pids:
+                pid_to_name = self._wait_for_pids()
+                if not pid_to_name:
                     return
 
                 processes = {}
-                for pid in pids:
+                for pid in pid_to_name:
                     try:
                         processes[pid] = psutil.Process(pid)
                     except psutil.NoSuchProcess:
@@ -432,7 +469,11 @@ class Bencher:
                     return
 
                 # Never kill an already-running process we attached to.
-                self._sample_processes(processes, kill_on_done=False)
+                self._sample_processes(
+                    processes,
+                    pid_names=pid_to_name,
+                    kill_on_done=False,
+                )
             else:
                 self.po = subprocess.Popen(self.args, -1, self.executable)
                 process = psutil.Process(self.po.pid)

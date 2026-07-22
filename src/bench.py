@@ -9,6 +9,7 @@ Examples:
     launch_per_pid      Launch the app and save under results/<name>/<pid>/
     attach_by_name      Attach via pidof; save all matching PIDs under results/<name>/
     attach_per_pid      Attach via pidof; save each PID under results/<name>/<pid>/
+    attach_gz_sim       Attach to "gz sim server" and "gz sim gui" concurrently
 """
 
 from __future__ import annotations
@@ -41,10 +42,10 @@ def run_bencher(cfg: BencherConfig, repeat_n_times: int = 1, show_plots: bool = 
     return b
 
 
-def _base_config(name: str = "gnome-text-editor") -> BencherConfig:
+def _base_config(name: str = "gnome-text-editor", executable: str | None = None) -> BencherConfig:
     cfg = BencherConfig()
     cfg.name = name
-    cfg.executable = name
+    cfg.executable = executable if executable is not None else name
     cfg.args = [""]
     cfg.callback = callback
     cfg.sample_time = 0.1
@@ -90,11 +91,33 @@ def example_attach_per_pid():
     return run_bencher(cfg)
 
 
+def example_attach_gz_sim():
+    """Attach to Gazebo Sim server and GUI and sample them concurrently.
+
+    Looks up both names in one run (same sample loop):
+      - "gz sim server"  -> results/gz-sim-server/
+      - "gz sim gui"     -> results/gz-sim-gui/
+
+    Start Gazebo before running, or wait_timeout will poll until they appear.
+    """
+    cfg = _base_config(name="gz-sim")
+    cfg.attach = True
+    cfg.attach_names = ["gz sim server", "gz sim gui"]
+    cfg.save_per_pid = False
+    cfg.sample_time = 0.1
+    cfg.sample_total = 50
+    cfg.wait_timeout = 60.0
+    cfg.wait_timestep = 0.5
+    print(f"Attaching concurrently to: {cfg.attach_names}")
+    return run_bencher(cfg, show_plots=False)
+
+
 EXAMPLES = {
     "launch_by_name": example_launch_by_name,
     "launch_per_pid": example_launch_per_pid,
     "attach_by_name": example_attach_by_name,
     "attach_per_pid": example_attach_per_pid,
+    "attach_gz_sim": example_attach_gz_sim,
 }
 
 
