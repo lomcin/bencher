@@ -148,6 +148,34 @@ class Bencher:
         fig.tight_layout()
         return fig
 
+    def save_csv(self):
+        """Persist each BencherData sample set as CSV under the configured results layout."""
+        saved = []
+        if self.save_per_pid:
+            by_pid = {}
+            for data in self.data_history:
+                by_pid.setdefault(data.pid, []).append(data)
+
+            for entries in by_pid.values():
+                results_dir = self.results_dir_for(entries[0])
+                os.makedirs(results_dir, exist_ok=True)
+                for i, data in enumerate(entries):
+                    path = os.path.join(results_dir, f'{i}.csv')
+                    data.to_data_frame().to_csv(path)
+                    saved.append(path)
+            return saved
+
+        results_dir = f'results/{self.name}/'
+        os.makedirs(results_dir, exist_ok=True)
+        for i, data in enumerate(self.data_history):
+            if data.pid is not None and self.attach:
+                path = os.path.join(results_dir, f'{data.pid}.csv')
+            else:
+                path = os.path.join(results_dir, f'{i}.csv')
+            data.to_data_frame().to_csv(path)
+            saved.append(path)
+        return saved
+
     def save_png(self, show: bool = False):
         """Save CPU and RAM plots as PNG images under the results directories."""
         saved = []
